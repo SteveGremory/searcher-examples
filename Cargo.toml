@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "backrun",
     "cli",
     "jito_protos",
     "searcher_client",
 ]
+exclude = ["searcher_client"]
 resolver = "2"
