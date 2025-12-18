@@ -3,14 +3,13 @@ use std::{env, path::PathBuf, sync::Arc};
 use clap::{Parser, Subcommand};
 use env_logger::TimestampPrecision;
 use jito_searcher_client::{SearcherClient, SearcherClientConfig};
-use log::{info, error};
+use log::{error, info};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_keypair::{Keypair, read_keypair_file};
-use solana_pubkey::Pubkey;
-use solana_signer::Signer;
 use solana_instruction::{AccountMeta, Instruction};
-#[allow(deprecated)]
-use solana_program::system_instruction;
+use solana_keypair::{read_keypair_file, Keypair};
+use solana_pubkey::Pubkey;
+use solana_system_interface::instruction as system_instruction;
+use solana_signer::Signer;
 use solana_transaction::Transaction;
 
 #[derive(Parser, Debug)]
@@ -68,12 +67,15 @@ enum Commands {
     },
 }
 
-async fn create_searcher_client(block_engine_url: &str, keypair: Option<Arc<Keypair>>) -> Result<SearcherClient, Box<dyn std::error::Error>> {
+async fn create_searcher_client(
+    block_engine_url: &str,
+    keypair: Option<Arc<Keypair>>,
+) -> Result<SearcherClient, Box<dyn std::error::Error>> {
     let config = SearcherClientConfig {
         endpoint: block_engine_url.to_string(),
         ..SearcherClientConfig::default()
     };
-    
+
     // Always create client but don't connect/authenticate yet
     match keypair {
         Some(kp) => {
@@ -116,59 +118,58 @@ async fn main() {
 
 async fn process_commands(args: Args, client: SearcherClient) {
     match args.command {
-        Commands::ConnectedLeaders => {
-            match client.get_connected_leaders().await {
-                Ok(connected_leaders) => {
-                    info!("Connected leaders: {:#?}", connected_leaders);
-                }
-                Err(e) => {
-                    eprintln!("Error getting connected leaders: {}", e);
-                }
+        Commands::ConnectedLeaders => match client.get_connected_leaders().await {
+            Ok(connected_leaders) => {
+                info!("Connected leaders: {:#?}", connected_leaders);
             }
-        }
-        Commands::ConnectedLeadersInfo { rpc_url } => {
-            match client.get_connected_leaders().await {
-                Ok(connected_validators) => {
-                    let rpc_client = RpcClient::new(rpc_url);
-                    match rpc_client.get_vote_accounts().await {
-                        Ok(rpc_vote_account_status) => {
-                            let total_activated_stake: u64 = rpc_vote_account_status
-                                .current
-                                .iter()
-                                .chain(rpc_vote_account_status.delinquent.iter())
-                                .map(|vote_account| vote_account.activated_stake)
-                                .sum();
+            Err(e) => {
+                eprintln!("Error getting connected leaders: {}", e);
+            }
+        },
+        Commands::ConnectedLeadersInfo { rpc_url } => match client.get_connected_leaders().await {
+            Ok(connected_validators) => {
+                let rpc_client = RpcClient::new(rpc_url);
+                match rpc_client.get_vote_accounts().await {
+                    Ok(rpc_vote_account_status) => {
+                        let total_activated_stake: u64 = rpc_vote_account_status
+                            .current
+                            .iter()
+                            .chain(rpc_vote_account_status.delinquent.iter())
+                            .map(|vote_account| vote_account.activated_stake)
+                            .sum();
 
-                            let mut total_activated_connected_stake = 0;
-                            for rpc_vote_account_info in rpc_vote_account_status.current {
-                                if connected_validators.contains_key(&rpc_vote_account_info.node_pubkey) {
-                                    total_activated_connected_stake += rpc_vote_account_info.activated_stake;
-                                    info!(
-                                        "connected_leader: {}, stake: {:.2}%",
-                                        rpc_vote_account_info.node_pubkey,
-                                        (rpc_vote_account_info.activated_stake * 100) as f64
-                                            / total_activated_stake as f64
-                                    );
-                                }
+                        let mut total_activated_connected_stake = 0;
+                        for rpc_vote_account_info in rpc_vote_account_status.current {
+                            if connected_validators.contains_key(&rpc_vote_account_info.node_pubkey)
+                            {
+                                total_activated_connected_stake +=
+                                    rpc_vote_account_info.activated_stake;
+                                info!(
+                                    "connected_leader: {}, stake: {:.2}%",
+                                    rpc_vote_account_info.node_pubkey,
+                                    (rpc_vote_account_info.activated_stake * 100) as f64
+                                        / total_activated_stake as f64
+                                );
                             }
-                            info!(
-                                "total stake for block engine: {:.2}%",
-                                (total_activated_connected_stake * 100) as f64 / total_activated_stake as f64
-                            );
                         }
-                        Err(e) => {
-                            eprintln!("Error getting vote accounts: {}", e);
-                        }
+                        info!(
+                            "total stake for block engine: {:.2}%",
+                            (total_activated_connected_stake * 100) as f64
+                                / total_activated_stake as f64
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Error getting vote accounts: {}", e);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error getting connected leaders: {}", e);
-                }
             }
-        }
+            Err(e) => {
+                eprintln!("Error getting connected leaders: {}", e);
+            }
+        },
         Commands::TipAccounts => {
             info!("Getting tip accounts (no authentication required)...");
-            
+
             match client.get_tip_accounts_no_auth().await {
                 Ok(accounts) => {
                     info!("SUCCESS! Retrieved {} tip accounts:", accounts.len());
@@ -192,7 +193,7 @@ async fn process_commands(args: Args, client: SearcherClient) {
         } => {
             let payer_keypair = read_keypair_file(&payer).expect("reads keypair at path");
             let rpc_client = RpcClient::new(rpc_url);
-            
+
             match rpc_client.get_balance(&payer_keypair.pubkey()).await {
                 Ok(balance) => {
                     info!(
@@ -211,12 +212,13 @@ async fn process_commands(args: Args, client: SearcherClient) {
                 Ok(blockhash) => {
                     let txs: Vec<_> = (0..num_txs)
                         .map(|i| {
+                            let memo_program_id = Pubkey::new_from_array(spl_memo::id().to_bytes());
                             let memo_ix = Instruction::new_with_bytes(
-                                spl_memo::id(),
+                                memo_program_id,
                                 format!("jito bundle {i}: {message}").as_bytes(),
                                 vec![AccountMeta::new(payer_keypair.pubkey(), true)],
                             );
-                            
+
                             let transfer_ix = system_instruction::transfer(
                                 &payer_keypair.pubkey(),
                                 &tip_account,
